@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useCallback } from 'react';
-import { getRealTimeDepartures } from '../api';
-import { formatTime, getMinutesUntil, isFavorite, addFavorite, removeFavorite, getEntityName } from '../utils';
+import { getDepartures } from '../api';
+import { formatTime, getMinutesUntil, isFavorite, addFavorite, removeFavorite } from '../utils';
 
 export default function Departures({ stop, onBack }) {
   const [departures, setDepartures] = useState([]);
@@ -8,66 +8,62 @@ export default function Departures({ stop, onBack }) {
   const [error, setError] = useState(null);
   const [lastUpdate, setLastUpdate] = useState(null);
   const [fav, setFav] = useState(
-    isFavorite(stop.entiteitnummer, stop.halteNummer)
+    isFavorite(stop.stopId || stop.halteNummer)
   );
+
+  const stopId = stop.stopId || stop.halteNummer;
 
   const fetchDepartures = useCallback(async () => {
     setLoading(true);
     setError(null);
     try {
-      const data = await getRealTimeDepartures(
-        stop.entiteitnummer,
-        stop.halteNummer
-      );
-      // Flatten all departures from all line directions
-      const allDepartures = [];
-      if (Array.isArray(data)) {
-        data.forEach((doorkomst) => {
-          const doorkomsten = doorkomst.doorkomsten || [];
-          doorkomsten.forEach((d) => {
-            allDepartures.push({
-              lineNumber: doorkomst.lijnnummer || d.lijnnummer,
-              lineName: doorkomst.lijnbeschrijving || '',
-              entityId: doorkomst.entiteitnummer || stop.entiteitnummer,
-              direction: doorkomst.richting || d.richting,
-              destination: doorkomst.bestemming || d.bestemming || 'Inconnu',
-              scheduledTime: d.dienstrepijtijd || d.dienstregelingtijdstip,
-              realTime: d.real_timeTijdstip || d.realtimeTijdstip,
-              prediction: d.predictionStatussen,
-            });
-          });
-        });
-      }
+      const data = await getDepartures(stopId);
 
-      // Sort by real-time or scheduled time
-      allDepartures.sort((a, b) => {
-        const timeA = new Date(a.realTime || a.scheduledTime);
-        const timeB = new Date(b.realTime || b.scheduledTime);
+      // Parse Rise API response - could be array or object with doorkomsten
+      let parsed = [];
+      const items = Array.isArray(data) ? data : (data.doorkomsten || data.vertrekken || data.results || []);
+
+      items.forEach((d) => {
+        parsed.push({
+          lineNumber: d.lijnnummerPubliek || d.lijnnummer || d.lijnNummerPubliek || d.lijn || '',
+          destination: d.bestemming || d.richting || d.omschrijving || 'Inconnu',
+          scheduledTime: d.vertrekCalendar || d.vertrekTijd || d.dienstrepijtijd || d.geplandVertrek || null,
+          realTime: d.vertrekRealtimeCalendar || d.realtimeVertrekTijd || d.realtimeVertrek || null,
+          lineColor: d.kleurAchterGrond || d.lijnKleur || null,
+          lineTextColor: d.kleurVoorGrond || d.lijnTekstKleur || null,
+          predictionType: d.predictionStatussen || d.voorspelling || null,
+          cancelled: d.geannuleerd || false,
+        });
+      });
+
+      // Sort by departure time
+      parsed.sort((a, b) => {
+        const timeA = new Date(a.realTime || a.scheduledTime || 0);
+        const timeB = new Date(b.realTime || b.scheduledTime || 0);
         return timeA - timeB;
       });
 
-      setDepartures(allDepartures);
+      setDepartures(parsed);
       setLastUpdate(new Date());
     } catch (err) {
       setError(err.message);
     } finally {
       setLoading(false);
     }
-  }, [stop]);
+  }, [stopId]);
 
   useEffect(() => {
     fetchDepartures();
-    // Auto-refresh every 30 seconds
     const interval = setInterval(fetchDepartures, 30000);
     return () => clearInterval(interval);
   }, [fetchDepartures]);
 
   function toggleFavorite() {
     if (fav) {
-      removeFavorite(stop.entiteitnummer, stop.halteNummer);
+      removeFavorite(stopId);
       setFav(false);
     } else {
-      addFavorite(stop);
+      addFavorite({ ...stop, stopId });
       setFav(true);
     }
   }
@@ -100,7 +96,7 @@ export default function Departures({ stop, onBack }) {
 
       <div className="stop-title">{stop.omschrijving}</div>
       <div className="stop-subtitle">
-        {stop.gemeenteNaam || getEntityName(stop.entiteitnummer)} — Arret #{stop.halteNummer}
+        {stop.gemeenteNaam && `${stop.gemeenteNaam} — `}Arret #{stopId}
       </div>
 
       <div className="refresh-bar">
@@ -133,14 +129,17 @@ export default function Departures({ stop, onBack }) {
       {departures.map((dep, i) => {
         const display = getTimeDisplay(dep);
         const isRealTime = !!dep.realTime;
+        const badgeStyle = dep.lineColor
+          ? { backgroundColor: dep.lineColor, color: dep.lineTextColor || '#1a1a2e' }
+          : {};
 
         return (
-          <div className="departure-row" key={i}>
-            <div className="line-badge">{dep.lineNumber}</div>
+          <div className={`departure-row ${dep.cancelled ? 'cancelled' : ''}`} key={i}>
+            <div className="line-badge" style={badgeStyle}>{dep.lineNumber}</div>
             <div className="departure-info">
               <div className="departure-destination">{dep.destination}</div>
               <div className="departure-details">
-                {isRealTime ? '📡 Temps reel' : '📅 Horaire'}
+                {dep.cancelled ? '❌ Annule' : isRealTime ? '📡 Temps reel' : '📅 Horaire'}
                 {dep.scheduledTime && ` — Prevu: ${formatTime(dep.scheduledTime)}`}
               </div>
             </div>

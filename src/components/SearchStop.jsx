@@ -1,6 +1,5 @@
 import React, { useState, useRef, useCallback } from 'react';
 import { searchStops } from '../api';
-import { getEntityName } from '../utils';
 
 export default function SearchStop({ onSelect }) {
   const [query, setQuery] = useState('');
@@ -23,7 +22,7 @@ export default function SearchStop({ onSelect }) {
 
     try {
       const stops = await searchStops(q);
-      setResults(stops);
+      setResults(Array.isArray(stops) ? stops : []);
     } catch (err) {
       setError(err.message);
       setResults([]);
@@ -70,22 +69,27 @@ export default function SearchStop({ onSelect }) {
         </div>
       )}
 
-      {!loading && results.map((stop) => {
-        const stopId = stop.halteNummer || stop.haltenummer;
-        const commune = stop.gemeenteNaam || stop.omschrijvingGemeente || getEntityName(stop.entiteitnummer);
+      {!loading && results.map((stop, index) => {
+        // Rise API uses halteNummer or halte_id or id
+        const stopId = stop.halteNummer || stop.haltenummer || stop.halte_id || stop.id || '';
+        const name = stop.omschrijving || stop.beschrijving || stop.naam || stop.title || '';
+        const commune = stop.gemeenteNaam || stop.omschrijvingGemeente || stop.gemeente || '';
+
         return (
           <div
-            key={`${stop.entiteitnummer}-${stopId}`}
+            key={`${stopId}-${index}`}
             className="card"
             onClick={() => onSelect({
               ...stop,
+              stopId: stopId,
               halteNummer: stopId,
+              omschrijving: name,
               gemeenteNaam: commune,
             })}
           >
-            <div className="stop-name">{stop.omschrijving}</div>
-            <div className="stop-commune">{commune}</div>
-            <div className="stop-number">Arret #{stopId}</div>
+            <div className="stop-name">{name}</div>
+            {commune && <div className="stop-commune">{commune}</div>}
+            {stopId && <div className="stop-number">Arret #{stopId}</div>}
           </div>
         );
       })}

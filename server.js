@@ -1,54 +1,36 @@
 import express from 'express';
 import cors from 'cors';
-import dotenv from 'dotenv';
 import { fileURLToPath } from 'url';
 import { dirname, join } from 'path';
-
-dotenv.config();
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 
 const app = express();
 const PORT = process.env.PORT || 3001;
-const API_KEY = process.env.DELIJN_API_KEY;
 
-const KERN_BASE = 'https://api.delijn.be/DLKernOpenData/api/v1';
-const ZOEK_BASE = 'https://api.delijn.be/DLZoekOpenData/api/v1';
+// De Lijn Rise API (powers their website, no API key needed)
+const RISE_CORE = 'https://www.delijn.be/rise-api-core';
+const RISE_SEARCH = 'https://www.delijn.be/rise-api-search';
 
 app.use(cors());
 app.use(express.json());
-
-// Serve built frontend in production
 app.use(express.static(join(__dirname, 'dist')));
 
-const headers = {
-  'Ocp-Apim-Subscription-Key': API_KEY,
-  'Accept': 'application/json',
-};
-
-async function proxyRequest(apiBase, path, res) {
-  if (!API_KEY || API_KEY === 'your_api_key_here' || API_KEY === 'not_configured_yet') {
-    return res.status(500).json({
-      error: 'API key not configured. Get your free key at https://data.delijn.be/',
-    });
-  }
-
-  const url = `${apiBase}${path}`;
-  console.log(`[PROXY] ${url}`);
-
+async function riseRequest(url, res) {
+  console.log(`[API] ${url}`);
   try {
-    const response = await fetch(url, { headers });
-    const text = await response.text();
+    const response = await fetch(url, {
+      headers: { 'Accept': 'application/json' },
+    });
 
-    console.log(`[PROXY] Status: ${response.status} | Body length: ${text.length}`);
+    const text = await response.text();
+    console.log(`[API] ${response.status} | ${text.length} bytes`);
 
     if (!response.ok) {
-      console.error(`[PROXY ERROR] ${response.status}: ${text.substring(0, 500)}`);
+      console.error(`[API ERROR] ${text.substring(0, 300)}`);
       return res.status(response.status).json({
         error: `De Lijn API error: ${response.status}`,
-        details: text.substring(0, 500),
-        url: url,
       });
     }
 
@@ -56,133 +38,59 @@ async function proxyRequest(apiBase, path, res) {
       const data = JSON.parse(text);
       res.json(data);
     } catch {
-      // Response is not JSON
-      console.error(`[PROXY] Non-JSON response: ${text.substring(0, 200)}`);
-      res.status(502).json({ error: 'Non-JSON response from API', details: text.substring(0, 200) });
+      console.error(`[API] Non-JSON: ${text.substring(0, 200)}`);
+      res.status(502).json({ error: 'Invalid response from De Lijn' });
     }
   } catch (err) {
-    console.error(`[PROXY ERROR] ${err.message}`);
-    res.status(500).json({ error: 'Failed to reach De Lijn API', details: err.message });
+    console.error(`[API ERROR] ${err.message}`);
+    res.status(500).json({ error: 'Failed to reach De Lijn API' });
   }
 }
 
-// Search stops by name - try Zoek API first, fallback to Kern API
-app.get('/api/search/stops/:query', async (req, res) => {
-  const query = encodeURIComponent(req.params.query);
-
-  // Try the search API (DLZoekOpenData)
-  const zoekUrl = `${ZOEK_BASE}/zoek/haltes/${query}`;
-  console.log(`[SEARCH] Trying Zoek API: ${zoekUrl}`);
-
-  try {
-    const response = await fetch(zoekUrl, { headers });
-
-    if (response.ok) {
-      const data = await response.json();
-      console.log(`[SEARCH] Zoek API success, found ${data.aantalHits || 0} hits`);
-      return res.json(data);
-    }
-
-    console.log(`[SEARCH] Zoek API failed with ${response.status}, trying Kern API...`);
-  } catch (err) {
-    console.log(`[SEARCH] Zoek API error: ${err.message}, trying Kern API...`);
-  }
-
-  // Fallback: search across all entities using Kern API
-  try {
-    const entities = [1, 2, 3, 4, 5]; // All De Lijn entities
-    const searchTerm = req.params.query.toLowerCase();
-    const allStops = [];
-
-    for (const entity of entities) {
-      const kernUrl = `${KERN_BASE}/haltes/${entity}?maxAantalHaltes=500`;
-      console.log(`[SEARCH] Trying Kern API entity ${entity}: ${kernUrl}`);
-
-      try {
-        const response = await fetch(kernUrl, { headers });
-        if (response.ok) {
-          const data = await response.json();
-          const haltes = data.haltes || data.halteObjects || [];
-          const matching = haltes.filter(h =>
-            (h.omschrijving || '').toLowerCase().includes(searchTerm) ||
-            (h.omschrijvingGemeente || '').toLowerCase().includes(searchTerm)
-          );
-          allStops.push(...matching.map(h => ({
-            ...h,
-            entiteitnummer: h.entiteitnummer || String(entity),
-            halteNummer: h.haltenummer || h.halteNummer,
-          })));
-        }
-      } catch {
-        // skip this entity
-      }
-    }
-
-    console.log(`[SEARCH] Kern API found ${allStops.length} matching stops`);
-    res.json({ haltes: allStops.slice(0, 20), aantalHits: allStops.length });
-  } catch (err) {
-    console.error(`[SEARCH] All search methods failed: ${err.message}`);
-    res.status(500).json({ error: 'Search failed', details: err.message });
-  }
+// Search stops by name
+app.get('/api/search/stops/:query', (req, res) => {
+  const q = encodeURIComponent(req.params.query);
+  riseRequest(`${RISE_SEARCH}/search/haltes/${q}/1`, res);
 });
 
-// Get all entities (provinces)
-app.get('/api/entities', (req, res) => {
-  proxyRequest(KERN_BASE, '/entiteiten', res);
+// Quick search (stops + lines + locations)
+app.get('/api/quicksearch/:query', (req, res) => {
+  const q = encodeURIComponent(req.params.query);
+  riseRequest(`${RISE_SEARCH}/search/quicksearch/${q}`, res);
 });
 
-// Get stop details
-app.get('/api/stops/:entity/:stop', (req, res) => {
-  proxyRequest(KERN_BASE, `/haltes/${req.params.entity}/${req.params.stop}`, res);
+// Location search
+app.get('/api/locations/:query', (req, res) => {
+  const q = encodeURIComponent(req.params.query);
+  riseRequest(`${RISE_SEARCH}/locations/locatiezoeker/10/${q}`, res);
+});
+
+// Get stop title/details
+app.get('/api/stops/:stopId/details', (req, res) => {
+  riseRequest(`${RISE_CORE}/haltes/titel/${req.params.stopId}`, res);
 });
 
 // Get real-time departures for a stop
-app.get('/api/stops/:entity/:stop/realtime', (req, res) => {
-  proxyRequest(
-    KERN_BASE,
-    `/haltes/${req.params.entity}/${req.params.stop}/real-time`,
-    res
-  );
-});
-
-// Get timetable for a stop
-app.get('/api/stops/:entity/:stop/timetable', (req, res) => {
-  proxyRequest(
-    KERN_BASE,
-    `/haltes/${req.params.entity}/${req.params.stop}/dienstregelingen`,
-    res
-  );
+app.get('/api/stops/:stopId/departures', (req, res) => {
+  const numResults = req.query.limit || 20;
+  riseRequest(`${RISE_CORE}/haltes/vertrekken/${req.params.stopId}/${numResults}`, res);
 });
 
 // Get lines passing through a stop
-app.get('/api/stops/:entity/:stop/lines', (req, res) => {
-  proxyRequest(
-    KERN_BASE,
-    `/haltes/${req.params.entity}/${req.params.stop}/lijnrichtingen`,
-    res
-  );
+app.get('/api/stops/:stopId/lines', (req, res) => {
+  riseRequest(`${RISE_CORE}/haltes/doorkomendelijnen/${req.params.stopId}`, res);
 });
 
-// Get line details
-app.get('/api/lines/:entity/:line', (req, res) => {
-  proxyRequest(KERN_BASE, `/lijnen/${req.params.entity}/${req.params.line}`, res);
+// Get nearby stops
+app.get('/api/nearby/:x/:y/:radius', (req, res) => {
+  riseRequest(`${RISE_CORE}/haltes/indebuurt/${req.params.x}/${req.params.y}/${req.params.radius}`, res);
 });
 
-// Get line directions
-app.get('/api/lines/:entity/:line/directions', (req, res) => {
-  proxyRequest(
-    KERN_BASE,
-    `/lijnen/${req.params.entity}/${req.params.line}/lijnrichtingen`,
-    res
-  );
-});
-
-// SPA fallback - serve index.html for all non-API routes
+// SPA fallback
 app.get('*', (req, res) => {
   res.sendFile(join(__dirname, 'dist', 'index.html'));
 });
 
 app.listen(PORT, '0.0.0.0', () => {
-  console.log(`De Lijn proxy server running on http://localhost:${PORT}`);
-  console.log(`API Key configured: ${API_KEY ? 'YES (' + API_KEY.substring(0, 4) + '...)' : 'NO'}`);
+  console.log(`De Lijn Bus app running on http://localhost:${PORT}`);
 });

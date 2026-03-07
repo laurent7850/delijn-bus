@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { getFavorites, removeFavorite, getEntityName } from '../utils';
+import { getFavorites, removeFavorite } from '../utils';
 
 export default function Favorites({ onSelect }) {
   const [favorites, setFavorites] = useState([]);
@@ -8,9 +8,9 @@ export default function Favorites({ onSelect }) {
     setFavorites(getFavorites());
   }, []);
 
-  function handleRemove(e, entityId, stopId) {
+  function handleRemove(e, stopId) {
     e.stopPropagation();
-    const updated = removeFavorite(entityId, stopId);
+    const updated = removeFavorite(stopId);
     setFavorites(updated);
   }
 
@@ -29,27 +29,25 @@ export default function Favorites({ onSelect }) {
 
   return (
     <div>
-      {favorites.map((fav) => (
-        <div
-          key={`${fav.entiteitnummer}-${fav.halteNummer}`}
-          className="card fav-card"
-        >
-          <div className="fav-card-info" onClick={() => onSelect(fav)}>
-            <div className="stop-name">{fav.omschrijving}</div>
-            <div className="stop-commune">
-              {fav.gemeenteNaam || getEntityName(fav.entiteitnummer)}
+      {favorites.map((fav) => {
+        const id = fav.stopId || fav.halteNummer;
+        return (
+          <div key={id} className="card fav-card">
+            <div className="fav-card-info" onClick={() => onSelect(fav)}>
+              <div className="stop-name">{fav.omschrijving}</div>
+              {fav.gemeenteNaam && <div className="stop-commune">{fav.gemeenteNaam}</div>}
+              <div className="stop-number">Arret #{id}</div>
             </div>
-            <div className="stop-number">Arret #{fav.halteNummer}</div>
+            <button
+              className="remove-fav"
+              onClick={(e) => handleRemove(e, id)}
+              title="Retirer des favoris"
+            >
+              ✕
+            </button>
           </div>
-          <button
-            className="remove-fav"
-            onClick={(e) => handleRemove(e, fav.entiteitnummer, fav.halteNummer)}
-            title="Retirer des favoris"
-          >
-            ✕
-          </button>
-        </div>
-      ))}
+        );
+      })}
     </div>
   );
 }
