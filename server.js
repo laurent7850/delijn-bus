@@ -28,35 +28,102 @@ const headers = {
 };
 
 async function proxyRequest(apiBase, path, res) {
-  if (!API_KEY || API_KEY === 'your_api_key_here') {
+  if (!API_KEY || API_KEY === 'your_api_key_here' || API_KEY === 'not_configured_yet') {
     return res.status(500).json({
       error: 'API key not configured. Get your free key at https://data.delijn.be/',
     });
   }
 
+  const url = `${apiBase}${path}`;
+  console.log(`[PROXY] ${url}`);
+
   try {
-    const url = `${apiBase}${path}`;
     const response = await fetch(url, { headers });
+    const text = await response.text();
+
+    console.log(`[PROXY] Status: ${response.status} | Body length: ${text.length}`);
 
     if (!response.ok) {
-      const text = await response.text();
+      console.error(`[PROXY ERROR] ${response.status}: ${text.substring(0, 500)}`);
       return res.status(response.status).json({
         error: `De Lijn API error: ${response.status}`,
-        details: text,
+        details: text.substring(0, 500),
+        url: url,
       });
     }
 
-    const data = await response.json();
-    res.json(data);
+    try {
+      const data = JSON.parse(text);
+      res.json(data);
+    } catch {
+      // Response is not JSON
+      console.error(`[PROXY] Non-JSON response: ${text.substring(0, 200)}`);
+      res.status(502).json({ error: 'Non-JSON response from API', details: text.substring(0, 200) });
+    }
   } catch (err) {
-    console.error('Proxy error:', err.message);
-    res.status(500).json({ error: 'Failed to reach De Lijn API' });
+    console.error(`[PROXY ERROR] ${err.message}`);
+    res.status(500).json({ error: 'Failed to reach De Lijn API', details: err.message });
   }
 }
 
-// Search stops by name
-app.get('/api/search/stops/:query', (req, res) => {
-  proxyRequest(ZOEK_BASE, `/zoek/haltes/${encodeURIComponent(req.params.query)}`, res);
+// Search stops by name - try Zoek API first, fallback to Kern API
+app.get('/api/search/stops/:query', async (req, res) => {
+  const query = encodeURIComponent(req.params.query);
+
+  // Try the search API (DLZoekOpenData)
+  const zoekUrl = `${ZOEK_BASE}/zoek/haltes/${query}`;
+  console.log(`[SEARCH] Trying Zoek API: ${zoekUrl}`);
+
+  try {
+    const response = await fetch(zoekUrl, { headers });
+
+    if (response.ok) {
+      const data = await response.json();
+      console.log(`[SEARCH] Zoek API success, found ${data.aantalHits || 0} hits`);
+      return res.json(data);
+    }
+
+    console.log(`[SEARCH] Zoek API failed with ${response.status}, trying Kern API...`);
+  } catch (err) {
+    console.log(`[SEARCH] Zoek API error: ${err.message}, trying Kern API...`);
+  }
+
+  // Fallback: search across all entities using Kern API
+  try {
+    const entities = [1, 2, 3, 4, 5]; // All De Lijn entities
+    const searchTerm = req.params.query.toLowerCase();
+    const allStops = [];
+
+    for (const entity of entities) {
+      const kernUrl = `${KERN_BASE}/haltes/${entity}?maxAantalHaltes=500`;
+      console.log(`[SEARCH] Trying Kern API entity ${entity}: ${kernUrl}`);
+
+      try {
+        const response = await fetch(kernUrl, { headers });
+        if (response.ok) {
+          const data = await response.json();
+          const haltes = data.haltes || data.halteObjects || [];
+          const matching = haltes.filter(h =>
+            (h.omschrijving || '').toLowerCase().includes(searchTerm) ||
+            (h.omschrijvingGemeente || '').toLowerCase().includes(searchTerm)
+          );
+          allStops.push(...matching.map(h => ({
+            ...h,
+            entiteitnummer: h.entiteitnummer || String(entity),
+            halteNummer: h.haltenummer || h.halteNummer,
+          })));
+        }
+      } catch {
+        // skip this entity
+      }
+    }
+
+    console.log(`[SEARCH] Kern API found ${allStops.length} matching stops`);
+    res.json({ haltes: allStops.slice(0, 20), aantalHits: allStops.length });
+  } catch (err) {
+    console.error(`[SEARCH] All search methods failed: ${err.message}`);
+    res.status(500).json({ error: 'Search failed', details: err.message });
+  }
 });
 
 // Get all entities (provinces)
@@ -117,7 +184,5 @@ app.get('*', (req, res) => {
 
 app.listen(PORT, '0.0.0.0', () => {
   console.log(`De Lijn proxy server running on http://localhost:${PORT}`);
-  if (!API_KEY || API_KEY === 'your_api_key_here') {
-    console.warn('WARNING: No API key configured! Copy .env.example to .env and add your key.');
-  }
+  console.log(`API Key configured: ${API_KEY ? 'YES (' + API_KEY.substring(0, 4) + '...)' : 'NO'}`);
 });

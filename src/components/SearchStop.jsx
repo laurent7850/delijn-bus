@@ -70,21 +70,25 @@ export default function SearchStop({ onSelect }) {
         </div>
       )}
 
-      {!loading && results.map((stop) => (
-        <div
-          key={`${stop.entiteitnummer}-${stop.halteNummer}`}
-          className="card"
-          onClick={() => onSelect(stop)}
-        >
-          <div className="stop-name">{stop.omschrijving}</div>
-          <div className="stop-commune">
-            {stop.gemeenteNaam || getEntityName(stop.entiteitnummer)}
+      {!loading && results.map((stop) => {
+        const stopId = stop.halteNummer || stop.haltenummer;
+        const commune = stop.gemeenteNaam || stop.omschrijvingGemeente || getEntityName(stop.entiteitnummer);
+        return (
+          <div
+            key={`${stop.entiteitnummer}-${stopId}`}
+            className="card"
+            onClick={() => onSelect({
+              ...stop,
+              halteNummer: stopId,
+              gemeenteNaam: commune,
+            })}
+          >
+            <div className="stop-name">{stop.omschrijving}</div>
+            <div className="stop-commune">{commune}</div>
+            <div className="stop-number">Arret #{stopId}</div>
           </div>
-          <div className="stop-number">
-            Arret #{stop.halteNummer}
-          </div>
-        </div>
-      ))}
+        );
+      })}
 
       {!searched && !loading && (
         <div className="empty-state">
