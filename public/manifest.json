@@ -1,0 +1,16 @@
+{
+  "name": "De Lijn - Horaires Bus",
+  "short_name": "De Lijn",
+  "description": "Consultez les horaires de bus De Lijn en temps réel",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#FFD200",
+  "theme_color": "#FFD200",
+  "icons": [
+    {
+      "src": "/favicon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml"
+    }
+  ]
+}
