@@ -1,17 +1,16 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import { getDepartures } from '../api';
-import { formatTime, getMinutesUntil, isFavorite, addFavorite, removeFavorite } from '../utils';
+import { isFavorite, addFavorite, removeFavorite } from '../utils';
 
 export default function Departures({ stop, onBack }) {
   const [departures, setDepartures] = useState([]);
+  const [stopName, setStopName] = useState(stop.omschrijving || '');
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
   const [lastUpdate, setLastUpdate] = useState(null);
-  const [fav, setFav] = useState(
-    isFavorite(stop.stopId || stop.halteNummer)
-  );
+  const [fav, setFav] = useState(isFavorite(stop.stopId));
 
-  const stopId = stop.stopId || stop.halteNummer;
+  const stopId = stop.stopId;
 
   const fetchDepartures = useCallback(async () => {
     setLoading(true);
@@ -19,31 +18,8 @@ export default function Departures({ stop, onBack }) {
     try {
       const data = await getDepartures(stopId);
 
-      // Parse Rise API response - could be array or object with doorkomsten
-      let parsed = [];
-      const items = Array.isArray(data) ? data : (data.doorkomsten || data.vertrekken || data.results || []);
-
-      items.forEach((d) => {
-        parsed.push({
-          lineNumber: d.lijnnummerPubliek || d.lijnnummer || d.lijnNummerPubliek || d.lijn || '',
-          destination: d.bestemming || d.richting || d.omschrijving || 'Inconnu',
-          scheduledTime: d.vertrekCalendar || d.vertrekTijd || d.dienstrepijtijd || d.geplandVertrek || null,
-          realTime: d.vertrekRealtimeCalendar || d.realtimeVertrekTijd || d.realtimeVertrek || null,
-          lineColor: d.kleurAchterGrond || d.lijnKleur || null,
-          lineTextColor: d.kleurVoorGrond || d.lijnTekstKleur || null,
-          predictionType: d.predictionStatussen || d.voorspelling || null,
-          cancelled: d.geannuleerd || false,
-        });
-      });
-
-      // Sort by departure time
-      parsed.sort((a, b) => {
-        const timeA = new Date(a.realTime || a.scheduledTime || 0);
-        const timeB = new Date(b.realTime || b.scheduledTime || 0);
-        return timeA - timeB;
-      });
-
-      setDepartures(parsed);
+      if (data.stopName) setStopName(data.stopName);
+      setDepartures(data.departures || []);
       setLastUpdate(new Date());
     } catch (err) {
       setError(err.message);
@@ -68,15 +44,8 @@ export default function Departures({ stop, onBack }) {
     }
   }
 
-  function getTimeDisplay(dep) {
-    const time = dep.realTime || dep.scheduledTime;
-    const minutes = getMinutesUntil(time);
-
-    if (minutes === null) return { text: '--', className: '', label: '' };
-    if (minutes <= 0) return { text: 'NOW', className: 'imminent', label: '' };
-    if (minutes <= 1) return { text: '1', className: 'imminent', label: 'min' };
-    if (minutes <= 10) return { text: `${minutes}`, className: 'soon', label: 'min' };
-    return { text: `${minutes}`, className: '', label: 'min' };
+  function formatUpdateTime(date) {
+    return date.toLocaleTimeString('fr-BE', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
   }
 
   return (
@@ -94,7 +63,7 @@ export default function Departures({ stop, onBack }) {
         </button>
       </div>
 
-      <div className="stop-title">{stop.omschrijving}</div>
+      <div className="stop-title">{stopName}</div>
       <div className="stop-subtitle">
         {stop.gemeenteNaam && `${stop.gemeenteNaam} — `}Arret #{stopId}
       </div>
@@ -105,7 +74,7 @@ export default function Departures({ stop, onBack }) {
         </button>
         {lastUpdate && (
           <span className="last-update">
-            Mis a jour: {formatTime(lastUpdate.toISOString())}
+            Mis a jour: {formatUpdateTime(lastUpdate)}
           </span>
         )}
       </div>
@@ -126,35 +95,22 @@ export default function Departures({ stop, onBack }) {
         </div>
       )}
 
-      {departures.map((dep, i) => {
-        const display = getTimeDisplay(dep);
-        const isRealTime = !!dep.realTime;
-        const badgeStyle = dep.lineColor
-          ? { backgroundColor: dep.lineColor, color: dep.lineTextColor || '#1a1a2e' }
-          : {};
-
-        return (
-          <div className={`departure-row ${dep.cancelled ? 'cancelled' : ''}`} key={i}>
-            <div className="line-badge" style={badgeStyle}>{dep.lineNumber}</div>
-            <div className="departure-info">
-              <div className="departure-destination">{dep.destination}</div>
-              <div className="departure-details">
-                {dep.cancelled ? '❌ Annule' : isRealTime ? '📡 Temps reel' : '📅 Horaire'}
-                {dep.scheduledTime && ` — Prevu: ${formatTime(dep.scheduledTime)}`}
-              </div>
-            </div>
-            <div className="departure-time">
-              <div className={`time-minutes ${display.className}`}>
-                {display.text}
-              </div>
-              <div className="time-label">{display.label}</div>
-              {dep.realTime && (
-                <div className="time-scheduled">{formatTime(dep.realTime)}</div>
-              )}
+      {departures.map((dep, i) => (
+        <div className="departure-row" key={i}>
+          <div className="line-badge">{dep.lineNumber}</div>
+          <div className="departure-info">
+            <div className="departure-destination">{dep.destination}</div>
+            {dep.description && (
+              <div className="departure-details">{dep.description}</div>
+            )}
+          </div>
+          <div className="departure-time">
+            <div className="time-minutes">
+              {dep.scheduledTime || dep.time || '--'}
             </div>
           </div>
-        );
-      })}
+        </div>
+      ))}
     </div>
   );
 }

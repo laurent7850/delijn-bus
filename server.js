@@ -2,6 +2,7 @@ import express from 'express';
 import cors from 'cors';
 import { fileURLToPath } from 'url';
 import { dirname, join } from 'path';
+import * as cheerio from 'cheerio';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -9,81 +10,181 @@ const __dirname = dirname(__filename);
 const app = express();
 const PORT = process.env.PORT || 3001;
 
-// De Lijn Rise API (powers their website, no API key needed)
-const RISE_CORE = 'https://www.delijn.be/rise-api-core';
-const RISE_SEARCH = 'https://www.delijn.be/rise-api-search';
+const DELIJN = 'https://www.delijn.be';
 
 app.use(cors());
 app.use(express.json());
 app.use(express.static(join(__dirname, 'dist')));
 
-async function riseRequest(url, res) {
-  console.log(`[API] ${url}`);
+// --- Search stops using De Lijn website API ---
+app.get('/api/search/stops/:query', async (req, res) => {
+  const q = encodeURIComponent(req.params.query);
+  const url = `${DELIJN}/api/search/?q=${q}&stopsAndLinesSize=20&contentSize=0&info=false&municipality=false&news=false&stops=true`;
+  console.log(`[SEARCH] ${url}`);
+
   try {
     const response = await fetch(url, {
-      headers: { 'Accept': 'application/json' },
+      headers: {
+        'Accept': 'application/json',
+        'User-Agent': 'Mozilla/5.0 (compatible; DeLijnApp/1.0)',
+      },
     });
 
-    const text = await response.text();
-    console.log(`[API] ${response.status} | ${text.length} bytes`);
+    if (!response.ok) {
+      console.error(`[SEARCH] Error ${response.status}`);
+      return res.status(response.status).json({ error: 'Search failed' });
+    }
+
+    const data = await response.json();
+    const results = data.stopsAndLines?.results || [];
+
+    // Transform to a simpler format for the frontend
+    const stops = results
+      .filter((r) => r.type === 'stop')
+      .map((r) => ({
+        stopId: r.id,
+        omschrijving: r.longDescription || r.shortDescription || '',
+        gemeenteNaam: r.cityDescription || '',
+        coordinate: r.coordinate || '',
+        lines: (r.lineDirections || []).map((ld) => ({
+          number: ld.publicLineNr,
+          destination: ld.destination,
+          description: ld.description,
+          color: ld.color,
+        })),
+      }));
+
+    console.log(`[SEARCH] Found ${stops.length} stops`);
+    res.json(stops);
+  } catch (err) {
+    console.error(`[SEARCH ERROR] ${err.message}`);
+    res.status(500).json({ error: 'Failed to search stops' });
+  }
+});
+
+// --- Get departures by scraping the De Lijn stop page ---
+app.get('/api/stops/:stopId/departures', async (req, res) => {
+  const stopId = req.params.stopId;
+  const url = `${DELIJN}/haltes/${stopId}/`;
+  console.log(`[DEPARTURES] Fetching ${url}`);
+
+  try {
+    const response = await fetch(url, {
+      headers: {
+        'Accept': 'text/html',
+        'User-Agent': 'Mozilla/5.0 (compatible; DeLijnApp/1.0)',
+        'Accept-Language': 'fr-BE,fr;q=0.9',
+      },
+    });
 
     if (!response.ok) {
-      console.error(`[API ERROR] ${text.substring(0, 300)}`);
-      return res.status(response.status).json({
-        error: `De Lijn API error: ${response.status}`,
-      });
+      console.error(`[DEPARTURES] Error ${response.status}`);
+      return res.status(response.status).json({ error: 'Failed to load stop' });
     }
 
-    try {
-      const data = JSON.parse(text);
-      res.json(data);
-    } catch {
-      console.error(`[API] Non-JSON: ${text.substring(0, 200)}`);
-      res.status(502).json({ error: 'Invalid response from De Lijn' });
+    const html = await response.text();
+    const $ = cheerio.load(html);
+
+    // Extract stop info from page
+    const stopName = $('h1').first().text().trim() ||
+      $('[class*="stop-name"], [class*="StopName"]').first().text().trim();
+
+    // Parse departures from the rendered HTML
+    const departures = [];
+
+    // Look for passage/departure rows in the HTML
+    // The page structure has departure items with line number, destination, and time
+    $('[class*="passage"], [class*="Passage"], [class*="departure"], [class*="Departure"]').each((i, el) => {
+      const $el = $(el);
+      const text = $el.text();
+
+      // Try to extract line number, destination, time
+      const lineEl = $el.find('[class*="line"], [class*="Line"], [class*="badge"]').first();
+      const destEl = $el.find('[class*="dest"], [class*="Dest"], [class*="direction"]').first();
+      const timeEl = $el.find('[class*="time"], [class*="Time"]').first();
+
+      if (lineEl.length || destEl.length || timeEl.length) {
+        departures.push({
+          lineNumber: lineEl.text().trim(),
+          destination: destEl.text().trim(),
+          time: timeEl.text().trim(),
+          raw: text.substring(0, 200),
+        });
+      }
+    });
+
+    // Fallback: parse from page text if no structured elements found
+    if (departures.length === 0) {
+      const bodyText = $('body').text();
+      const passagesMatch = bodyText.indexOf('Upcoming passages');
+      const passagesMatchFr = bodyText.indexOf('Prochains passages');
+      const passagesMatchNl = bodyText.indexOf('Eerstvolgende doorkomsten');
+      const startIdx = Math.max(passagesMatch, passagesMatchFr, passagesMatchNl);
+
+      if (startIdx > -1) {
+        // Extract the text after "Upcoming passages" and parse it
+        const passageText = bodyText.substring(startIdx, startIdx + 2000);
+        // Pattern: Line XX\nDestination\nDescription\nHH:MM
+        const timeRegex = /(\d{1,2}:\d{2})/g;
+        const lines = passageText.split('\n').map((l) => l.trim()).filter(Boolean);
+
+        let currentLine = null;
+        let currentDest = null;
+        let currentDesc = null;
+
+        for (let i = 0; i < lines.length; i++) {
+          const line = lines[i];
+
+          // Skip header
+          if (line.includes('Upcoming passages') || line.includes('Prochains passages') ||
+              line.includes('Eerstvolgende') || line === 'Now' || line === 'Maintenant' ||
+              line === 'Nu' || line.includes('Diversion') || line.includes('Omleiding') ||
+              line.includes('view solutions') || line.includes('Show next')) {
+            continue;
+          }
+
+          // Check if this is a line number (e.g., "Line 77" or just "77")
+          const lineMatch = line.match(/^(?:Line |Lijn |Ligne )?(\d+[A-Za-z]?)\s*$/);
+          // Check if this is a combined line+dest like "77Deinze Kerkhof"
+          const combinedMatch = line.match(/^(\d+[A-Za-z]?)([A-Z].+)$/);
+          // Check if this is a time
+          const timeMatch = line.match(/^(\d{1,2}:\d{2})$/);
+
+          if (combinedMatch) {
+            currentLine = combinedMatch[1];
+            currentDest = combinedMatch[2];
+            currentDesc = null;
+          } else if (lineMatch) {
+            currentLine = lineMatch[1];
+            currentDest = null;
+            currentDesc = null;
+          } else if (timeMatch && currentLine) {
+            departures.push({
+              lineNumber: currentLine,
+              destination: currentDest || '',
+              description: currentDesc || '',
+              scheduledTime: timeMatch[1],
+              realTime: null,
+            });
+          } else if (currentLine && !currentDest) {
+            currentDest = line;
+          } else if (currentLine && currentDest && !currentDesc) {
+            currentDesc = line;
+          }
+        }
+      }
     }
+
+    console.log(`[DEPARTURES] Found ${departures.length} departures for stop ${stopId}`);
+    res.json({
+      stopId,
+      stopName,
+      departures,
+    });
   } catch (err) {
-    console.error(`[API ERROR] ${err.message}`);
-    res.status(500).json({ error: 'Failed to reach De Lijn API' });
+    console.error(`[DEPARTURES ERROR] ${err.message}`);
+    res.status(500).json({ error: 'Failed to load departures' });
   }
-}
-
-// Search stops by name
-app.get('/api/search/stops/:query', (req, res) => {
-  const q = encodeURIComponent(req.params.query);
-  riseRequest(`${RISE_SEARCH}/search/haltes/${q}/1`, res);
-});
-
-// Quick search (stops + lines + locations)
-app.get('/api/quicksearch/:query', (req, res) => {
-  const q = encodeURIComponent(req.params.query);
-  riseRequest(`${RISE_SEARCH}/search/quicksearch/${q}`, res);
-});
-
-// Location search
-app.get('/api/locations/:query', (req, res) => {
-  const q = encodeURIComponent(req.params.query);
-  riseRequest(`${RISE_SEARCH}/locations/locatiezoeker/10/${q}`, res);
-});
-
-// Get stop title/details
-app.get('/api/stops/:stopId/details', (req, res) => {
-  riseRequest(`${RISE_CORE}/haltes/titel/${req.params.stopId}`, res);
-});
-
-// Get real-time departures for a stop
-app.get('/api/stops/:stopId/departures', (req, res) => {
-  const numResults = req.query.limit || 20;
-  riseRequest(`${RISE_CORE}/haltes/vertrekken/${req.params.stopId}/${numResults}`, res);
-});
-
-// Get lines passing through a stop
-app.get('/api/stops/:stopId/lines', (req, res) => {
-  riseRequest(`${RISE_CORE}/haltes/doorkomendelijnen/${req.params.stopId}`, res);
-});
-
-// Get nearby stops
-app.get('/api/nearby/:x/:y/:radius', (req, res) => {
-  riseRequest(`${RISE_CORE}/haltes/indebuurt/${req.params.x}/${req.params.y}/${req.params.radius}`, res);
 });
 
 // SPA fallback
