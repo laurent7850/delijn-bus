@@ -97,7 +97,15 @@ export default function Departures({ stop, onBack }) {
 
       {departures.map((dep, i) => (
         <div className="departure-row" key={i}>
-          <div className="line-badge">{dep.lineNumber}</div>
+          <div
+            className="line-badge"
+            style={dep.lineColor ? {
+              backgroundColor: dep.lineColor.background,
+              color: dep.lineColor.foreground,
+            } : {}}
+          >
+            {dep.lineNumber}
+          </div>
           <div className="departure-info">
             <div className="departure-destination">{dep.destination}</div>
             {dep.description && (
@@ -106,8 +114,18 @@ export default function Departures({ stop, onBack }) {
           </div>
           <div className="departure-time">
             <div className="time-minutes">
-              {dep.scheduledTime || dep.time || '--'}
+              {dep.minutesUntil != null && dep.minutesUntil <= 0
+                ? 'maintenant'
+                : dep.minutesUntil != null && dep.minutesUntil <= 60
+                  ? `${dep.minutesUntil} min`
+                  : dep.realTime || dep.scheduledTime || '--'}
             </div>
+            {dep.realTime && dep.scheduledTime && dep.realTime !== dep.scheduledTime && (
+              <div className="time-scheduled">{dep.scheduledTime}</div>
+            )}
+            {dep.isRealtime && (
+              <div className="realtime-badge">temps reel</div>
+            )}
           </div>
         </div>
       ))}

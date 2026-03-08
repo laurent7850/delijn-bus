@@ -2,7 +2,6 @@ import express from 'express';
 import cors from 'cors';
 import { fileURLToPath } from 'url';
 import { dirname, join } from 'path';
-import * as cheerio from 'cheerio';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -11,6 +10,7 @@ const app = express();
 const PORT = process.env.PORT || 3001;
 
 const DELIJN = 'https://www.delijn.be';
+const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36';
 
 app.use(cors());
 app.use(express.json());
@@ -24,10 +24,7 @@ app.get('/api/search/stops/:query', async (req, res) => {
 
   try {
     const response = await fetch(url, {
-      headers: {
-        'Accept': 'application/json',
-        'User-Agent': 'Mozilla/5.0 (compatible; DeLijnApp/1.0)',
-      },
+      headers: { 'Accept': 'application/json', 'User-Agent': UA },
     });
 
     if (!response.ok) {
@@ -38,7 +35,6 @@ app.get('/api/search/stops/:query', async (req, res) => {
     const data = await response.json();
     const results = data.stopsAndLines?.results || [];
 
-    // Transform to a simpler format for the frontend
     const stops = results
       .filter((r) => r.type === 'stop')
       .map((r) => ({
@@ -62,125 +58,68 @@ app.get('/api/search/stops/:query', async (req, res) => {
   }
 });
 
-// --- Get departures by scraping the De Lijn stop page ---
+// --- Get departures using De Lijn networktrips API ---
 app.get('/api/stops/:stopId/departures', async (req, res) => {
   const stopId = req.params.stopId;
-  const url = `${DELIJN}/haltes/${stopId}/`;
-  console.log(`[DEPARTURES] Fetching ${url}`);
+  const now = new Date().toISOString().slice(0, 19);
+  const url = `${DELIJN}/api/networktrips/stops/${stopId}/?type=MERGEFLEX&detoursPolicy=noDetours&enrichmentType=LINEDIRECTIONS&date=${now}`;
+  console.log(`[DEPARTURES] ${url}`);
 
   try {
     const response = await fetch(url, {
-      headers: {
-        'Accept': 'text/html',
-        'User-Agent': 'Mozilla/5.0 (compatible; DeLijnApp/1.0)',
-        'Accept-Language': 'fr-BE,fr;q=0.9',
-      },
+      headers: { 'Accept': 'application/json', 'User-Agent': UA },
     });
 
     if (!response.ok) {
       console.error(`[DEPARTURES] Error ${response.status}`);
-      return res.status(response.status).json({ error: 'Failed to load stop' });
+      return res.status(response.status).json({ error: 'Failed to load departures' });
     }
 
-    const html = await response.text();
-    const $ = cheerio.load(html);
+    const data = await response.json();
+    const trips = data.trips || [];
 
-    // Extract stop info from page
-    const stopName = $('h1').first().text().trim() ||
-      $('[class*="stop-name"], [class*="StopName"]').first().text().trim();
+    const departures = trips.map((trip) => {
+      const passage = trip.passages?.[0];
+      const planned = passage?.plannedPassage;
+      const realtime = passage?.realtimePassage;
+      const line = trip.lineDirection?.line;
+      const hasRealtime = passage?.realtimeStatuses?.includes('REALTIME');
 
-    // Parse departures from the rendered HTML
-    const departures = [];
+      // Format time as HH:MM
+      const formatTime = (dt) => {
+        if (!dt) return null;
+        const d = new Date(dt);
+        return d.toLocaleTimeString('fr-BE', { hour: '2-digit', minute: '2-digit', timeZone: 'Europe/Brussels' });
+      };
 
-    // Look for passage/departure rows in the HTML
-    // The page structure has departure items with line number, destination, and time
-    $('[class*="passage"], [class*="Passage"], [class*="departure"], [class*="Departure"]').each((i, el) => {
-      const $el = $(el);
-      const text = $el.text();
+      const scheduledTime = formatTime(planned?.departureDateTime || planned?.arrivalDateTime);
+      const realTime = hasRealtime ? formatTime(realtime?.departureDateTime || realtime?.arrivalDateTime) : null;
 
-      // Try to extract line number, destination, time
-      const lineEl = $el.find('[class*="line"], [class*="Line"], [class*="badge"]').first();
-      const destEl = $el.find('[class*="dest"], [class*="Dest"], [class*="direction"]').first();
-      const timeEl = $el.find('[class*="time"], [class*="Time"]').first();
+      // Calculate minutes until arrival
+      const arrivalEpoch = hasRealtime
+        ? (realtime?.arrivalEpoch || realtime?.departureEpoch)
+        : (planned?.arrivalEpoch || planned?.departureEpoch);
+      const minutesUntil = arrivalEpoch ? Math.round((arrivalEpoch - Date.now()) / 60000) : null;
 
-      if (lineEl.length || destEl.length || timeEl.length) {
-        departures.push({
-          lineNumber: lineEl.text().trim(),
-          destination: destEl.text().trim(),
-          time: timeEl.text().trim(),
-          raw: text.substring(0, 200),
-        });
-      }
+      return {
+        lineNumber: line?.publicLineNr || '',
+        lineColor: line?.lineColor || null,
+        destination: trip.placeDestination || trip.planningDestination || '',
+        description: trip.lineDirection?.description || '',
+        scheduledTime,
+        realTime,
+        minutesUntil,
+        isRealtime: hasRealtime,
+      };
     });
 
-    // Fallback: parse from page text if no structured elements found
-    if (departures.length === 0) {
-      const bodyText = $('body').text();
-      const passagesMatch = bodyText.indexOf('Upcoming passages');
-      const passagesMatchFr = bodyText.indexOf('Prochains passages');
-      const passagesMatchNl = bodyText.indexOf('Eerstvolgende doorkomsten');
-      const startIdx = Math.max(passagesMatch, passagesMatchFr, passagesMatchNl);
+    // Sort by arrival time and filter out past departures
+    const upcoming = departures
+      .filter((d) => d.minutesUntil === null || d.minutesUntil >= -1)
+      .sort((a, b) => (a.minutesUntil ?? 999) - (b.minutesUntil ?? 999));
 
-      if (startIdx > -1) {
-        // Extract the text after "Upcoming passages" and parse it
-        const passageText = bodyText.substring(startIdx, startIdx + 2000);
-        // Pattern: Line XX\nDestination\nDescription\nHH:MM
-        const timeRegex = /(\d{1,2}:\d{2})/g;
-        const lines = passageText.split('\n').map((l) => l.trim()).filter(Boolean);
-
-        let currentLine = null;
-        let currentDest = null;
-        let currentDesc = null;
-
-        for (let i = 0; i < lines.length; i++) {
-          const line = lines[i];
-
-          // Skip header
-          if (line.includes('Upcoming passages') || line.includes('Prochains passages') ||
-              line.includes('Eerstvolgende') || line === 'Now' || line === 'Maintenant' ||
-              line === 'Nu' || line.includes('Diversion') || line.includes('Omleiding') ||
-              line.includes('view solutions') || line.includes('Show next')) {
-            continue;
-          }
-
-          // Check if this is a line number (e.g., "Line 77" or just "77")
-          const lineMatch = line.match(/^(?:Line |Lijn |Ligne )?(\d+[A-Za-z]?)\s*$/);
-          // Check if this is a combined line+dest like "77Deinze Kerkhof"
-          const combinedMatch = line.match(/^(\d+[A-Za-z]?)([A-Z].+)$/);
-          // Check if this is a time
-          const timeMatch = line.match(/^(\d{1,2}:\d{2})$/);
-
-          if (combinedMatch) {
-            currentLine = combinedMatch[1];
-            currentDest = combinedMatch[2];
-            currentDesc = null;
-          } else if (lineMatch) {
-            currentLine = lineMatch[1];
-            currentDest = null;
-            currentDesc = null;
-          } else if (timeMatch && currentLine) {
-            departures.push({
-              lineNumber: currentLine,
-              destination: currentDest || '',
-              description: currentDesc || '',
-              scheduledTime: timeMatch[1],
-              realTime: null,
-            });
-          } else if (currentLine && !currentDest) {
-            currentDest = line;
-          } else if (currentLine && currentDest && !currentDesc) {
-            currentDesc = line;
-          }
-        }
-      }
-    }
-
-    console.log(`[DEPARTURES] Found ${departures.length} departures for stop ${stopId}`);
-    res.json({
-      stopId,
-      stopName,
-      departures,
-    });
+    console.log(`[DEPARTURES] Found ${upcoming.length} departures for stop ${stopId}`);
+    res.json({ stopId, departures: upcoming });
   } catch (err) {
     console.error(`[DEPARTURES ERROR] ${err.message}`);
     res.status(500).json({ error: 'Failed to load departures' });
